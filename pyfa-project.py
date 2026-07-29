@@ -144,12 +144,11 @@ MC1_PRODUCT_NAME = 'green material/processed product line'
 
 SENSOR_CONFIRM_TIME = 0.00
 
-# If blue is pushed too early, increase this by 0.05~0.10.
-# If blue passes without being pushed, decrease this toward 0.00.
-BLUE_TO_PUSHER_DELAY = 0.40
-PUSH_TIME = 2.00
+# Keep this at 0.00 to push immediately when Vision Sensor detects blue.
+BLUE_TO_PUSHER_DELAY = 0.50
+PUSH_TIME = 3.00
 PUSH_EXTEND_TIMEOUT = 1.50
-PUSH_RETRACT_TIMEOUT = 2.00
+PUSH_RETRACT_TIMEOUT = 1.00
 PUSH_COOLDOWN = 0.50
 
 STOP_CONVEYORS_DURING_MACHINING = False
@@ -813,7 +812,7 @@ def production_loop():
 
 def pulse_pusher_for_blue():
     log_modbus_record('pusher_cycle_start', 'coil', COIL_PUSHER_0, 1, 'Pusher 0')
-    print('Vision Sensor 0 BLUE -> Coil 5 Pusher 0 ON for', PUSH_TIME, 'seconds')
+    print('Vision Sensor 0 BLUE -> Coil 5 Pusher 0 ON immediately for', PUSH_TIME, 'seconds')
     write_coil(COIL_PUSHER_0, True)
 
     start_time = tt.time()
@@ -905,7 +904,7 @@ def sorting_loop():
         if blue_now:
             green_sensor_latched = False
 
-            if not blue_sensor_latched and wait_stable_blue_sensor():
+            if not blue_sensor_latched:
                 blue_sensor_latched = True
                 schedule_blue_push_from_vision()
         elif green_now:
