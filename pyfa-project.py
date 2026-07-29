@@ -14,7 +14,7 @@ import os
 import time as tt
 import threading
 
-IP_ADDRESS = '210.119.14.76'
+IP_ADDRESS = '210.119.14.58'
 PORT = 502
 UNIT_ID = 1
 
