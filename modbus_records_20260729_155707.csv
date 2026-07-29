@@ -1,6 +1,0 @@
-datetime,event,area,value,detail
-2026-07-29 16:03:06,machine_done,,,mc0 blue material/processed product
-2026-07-29 16:03:07,machine_done,,,mc1 green material/processed product
-2026-07-29 16:03:08,cycle_start,,,MC0 blue and MC1 green run together
-2026-07-29 16:03:08,machine_start,,,mc0 blue material/processed product
-2026-07-29 16:03:08,machine_start,,,mc1 green material/processed product
