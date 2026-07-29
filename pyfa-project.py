@@ -9,6 +9,8 @@ Press Ctrl+C to stop all outputs safely.
 
 # Cell 1: Modbus connection
 from pymodbus.client import ModbusTcpClient
+import csv
+import os
 import time as tt
 import threading
 
@@ -22,7 +24,7 @@ print('connected =', connected)
 
 # Cell 2: I/O mapping from Factory I/O driver
 # Updated for the current Factory I/O driver screen.
-# Input 0 = Vision Sensor 0, configured to detect BLUE products only.
+# Input Reg 0 = Vision Sensor 0 Value, configured to detect product colors.
 IN_VISION_SENSOR_0 = 0
 IN_BLUE_SENSOR = IN_VISION_SENSOR_0
 IN_MC0_OPENED = 1
@@ -38,8 +40,9 @@ IN_SENSOR_2 = 10
 IN_SENSOR_3 = 11
 IN_SENSOR_4 = 12
 
-REG_MC0_PROGRESS = 0
-REG_MC1_PROGRESS = 1
+REG_VISION_SENSOR_0_VALUE = 0
+REG_MC0_PROGRESS = 1
+REG_MC1_PROGRESS = 2
 
 COIL_EMITTER_0 = 0
 COIL_MC0_STOP = 1
@@ -89,19 +92,21 @@ CONVEYOR_COILS = [
     COIL_CURVE_4_CCW,
 ]
 
-# Vision Sensor 0 must be configured in Factory I/O to detect BLUE only.
-# Green must pass with Input 0 = False.
-VISION_BLUE_SENSOR = IN_VISION_SENSOR_0
-BLUE_SENSOR = VISION_BLUE_SENSOR
-BLUE_SENSOR_ACTIVE_STATE = True
+# Vision Sensor 0 Value must be mapped to Input Reg 0 in Factory I/O.
+# Common values in this scene: 1 = blue, 4 = green/other, 0 = no product.
+VISION_VALUE_REGISTER = REG_VISION_SENSOR_0_VALUE
+VISION_BLUE_VALUE = 1
 EXIT_SENSOR = IN_SENSOR_4
 
-# If Vision Sensor 0 turns False when blue is detected, change this to False.
-# Current Factory I/O driver image normally uses True when Vision Sensor 0 detects blue.
 VISION_SENSOR_DEBUG = True
+MODBUS_RECORD_ENABLED = True
+MODBUS_RECORD_FILE = 'modbus_records.csv'
+MODBUS_RECORD_RESET_ON_START = True
+MODBUS_SNAPSHOT_INTERVAL = 0.20
 
-# Vision Sensor 0 alone decides whether the product is blue.
-# Input 0 True -> blue -> pusher ON. Input 0 False -> green/other -> pusher OFF.
+# Vision Sensor 0 alone decides whether a material or machined product is blue.
+# Input Reg 0 == 1 -> blue from any machining center -> pusher ON.
+# Input Reg 0 != 1 -> non-blue -> pusher OFF.
 
 EMIT_TIME = 0.35
 START_HOLD = 0.5
@@ -114,20 +119,18 @@ MACHINE_TIMEOUT = 20.0
 WAIT_SORT_DONE_TIMEOUT = 35.0
 REPEAT_DELAY = 0.8
 
-MC0_PRODUCT_NAME = 'blue product lid/base line'
-MC1_PRODUCT_NAME = 'green product lid/base line'
+MC0_PRODUCT_NAME = 'blue material/processed product line'
+MC1_PRODUCT_NAME = 'blue material/processed product line'
 
 SENSOR_CONFIRM_TIME = 0.00
 
 # If blue is pushed too early, increase this by 0.05~0.10.
 # If blue passes without being pushed, decrease this toward 0.00.
-BLUE_TO_PUSHER_DELAY = 0.20
+BLUE_TO_PUSHER_DELAY = 0.40
 PUSH_TIME = 2.00
-PUSH_RETURN_TIME = 1.40
-PUSH_CYCLE_GAP = 0.80
 PUSH_EXTEND_TIMEOUT = 1.50
 PUSH_RETRACT_TIMEOUT = 2.00
-PUSH_COOLDOWN = 0.80
+PUSH_COOLDOWN = 0.50
 
 STOP_CONVEYORS_DURING_MACHINING = False
 POST_MACHINE_RELEASE_TIME = 0.8
@@ -144,16 +147,85 @@ production_thread = None
 sorting_thread = None
 machine_repeat_thread = None
 blue_push_thread = None
+modbus_record_thread = None
 blue_push_busy = False
 blue_sensor_latched = False
+blue_push_pending = 0
+blue_push_lock = threading.Lock()
 sort_done_event = threading.Event()
 exit_event = threading.Event()
 machining_lock = threading.Lock()
 active_machining_count = 0
+modbus_record_lock = threading.Lock()
+logged_coil_values = {}
+
+MODBUS_RECORD_HEADER = ['datetime', 'epoch_seconds', 'event', 'area', 'addr', 'value', 'detail']
+
+COIL_NAMES = {
+    COIL_EMITTER_0: 'Emitter 0',
+    COIL_MC0_STOP: 'MC0 Stop',
+    COIL_MC0_RESET: 'MC0 Reset',
+    COIL_MC0_START: 'MC0 Start',
+    COIL_MC0_PRODUCE: 'MC0 Produce Lids',
+    COIL_PUSHER_0: 'Pusher 0',
+    COIL_REMOVER_0: 'Remover 0',
+    COIL_REMOVER_1: 'Remover 1',
+    COIL_EMITTER_1: 'Emitter 1',
+    COIL_MC1_STOP: 'MC1 Stop',
+    COIL_MC1_RESET: 'MC1 Reset',
+    COIL_MC1_START: 'MC1 Start',
+    COIL_MC1_PRODUCE: 'MC1 Produce Lids',
+}
+
+REGISTER_NAMES = {
+    REG_VISION_SENSOR_0_VALUE: 'Vision Sensor 0 Value',
+    REG_MC0_PROGRESS: 'MC0 Progress',
+    REG_MC1_PROGRESS: 'MC1 Progress',
+}
 
 # Cell 4: Modbus helper functions
 def _is_error(result):
     return hasattr(result, 'isError') and result.isError()
+
+def init_modbus_record_file(reset_file=MODBUS_RECORD_RESET_ON_START):
+    if not MODBUS_RECORD_ENABLED:
+        return
+
+    mode = 'w' if reset_file else 'a'
+
+    with modbus_record_lock:
+        need_header = reset_file or not os.path.exists(MODBUS_RECORD_FILE) or os.path.getsize(MODBUS_RECORD_FILE) == 0
+
+        with open(MODBUS_RECORD_FILE, mode, newline='', encoding='utf-8') as log_file:
+            writer = csv.writer(log_file)
+
+            if need_header:
+                writer.writerow(MODBUS_RECORD_HEADER)
+
+def log_modbus_record(event, area='', addr='', value='', detail=''):
+    if not MODBUS_RECORD_ENABLED:
+        return
+
+    row = [
+        tt.strftime('%Y-%m-%d %H:%M:%S'),
+        f'{tt.time():.3f}',
+        event,
+        area,
+        addr,
+        value,
+        detail,
+    ]
+
+    with modbus_record_lock:
+        need_header = not os.path.exists(MODBUS_RECORD_FILE) or os.path.getsize(MODBUS_RECORD_FILE) == 0
+
+        with open(MODBUS_RECORD_FILE, 'a', newline='', encoding='utf-8') as log_file:
+            writer = csv.writer(log_file)
+
+            if need_header:
+                writer.writerow(MODBUS_RECORD_HEADER)
+
+            writer.writerow(row)
 
 def read_input(addr):
     try:
@@ -183,12 +255,25 @@ def read_holding_register(addr):
     return result.registers[0]
 
 def write_coil(addr, value):
+    value = bool(value)
+
     try:
-        result = client.write_coil(addr, bool(value), slave=UNIT_ID)
+        result = client.write_coil(addr, value, slave=UNIT_ID)
     except TypeError:
-        result = client.write_coil(addr, bool(value))
+        result = client.write_coil(addr, value)
     if _is_error(result):
         raise RuntimeError(f'Coil {addr} write failed')
+
+    if addr not in CONVEYOR_COILS and logged_coil_values.get(addr) != value:
+        logged_coil_values[addr] = value
+        log_modbus_record(
+            'write_coil',
+            'coil',
+            addr,
+            int(value),
+            COIL_NAMES.get(addr, ''),
+        )
+
     return result
 
 def write_coils(addr, values):
@@ -198,15 +283,29 @@ def write_coils(addr, values):
         result = client.write_coils(addr, values)
     if _is_error(result):
         raise RuntimeError(f'Coils from {addr} write failed')
+
+    log_modbus_record('write_coils', 'coil', addr, list(map(int, values)), f'count={len(values)}')
+
     return result
 
 def write_register(addr, value):
+    value = int(value)
+
     try:
-        result = client.write_register(addr, int(value), slave=UNIT_ID)
+        result = client.write_register(addr, value, slave=UNIT_ID)
     except TypeError:
-        result = client.write_register(addr, int(value))
+        result = client.write_register(addr, value)
     if _is_error(result):
         raise RuntimeError(f'Holding register {addr} write failed')
+
+    log_modbus_record(
+        'write_register',
+        'holding_register',
+        addr,
+        value,
+        REGISTER_NAMES.get(addr, ''),
+    )
+
     return result
 
 def write_registers(addr, values):
@@ -217,7 +316,43 @@ def write_registers(addr, values):
         result = client.write_registers(addr, values)
     if _is_error(result):
         raise RuntimeError(f'Holding registers from {addr} write failed')
+
+    log_modbus_record('write_registers', 'holding_register', addr, values, f'count={len(values)}')
+
     return result
+
+def read_modbus_snapshot():
+    vision_value = read_register(VISION_VALUE_REGISTER)
+
+    return {
+        'vision_value': vision_value,
+        'blue_detected': vision_value == VISION_BLUE_VALUE,
+        'mc0_busy': read_input(IN_MC0_BUSY),
+        'mc0_error': read_input(IN_MC0_ERROR),
+        'mc0_progress': read_register(REG_MC0_PROGRESS),
+        'mc1_busy': read_input(IN_MC1_BUSY),
+        'mc1_error': read_input(IN_MC1_ERROR),
+        'mc1_progress': read_register(REG_MC1_PROGRESS),
+        'pusher_front': read_input(IN_PUSHER_FRONT),
+        'pusher_back': read_input(IN_PUSHER_BACK),
+        'exit_sensor': read_input(EXIT_SENSOR),
+        'pusher_busy': blue_push_busy,
+        'pusher_pending': blue_push_pending,
+    }
+
+def modbus_record_loop():
+    print('Modbus record loop started:', MODBUS_RECORD_FILE)
+
+    while process_run:
+        try:
+            snapshot = read_modbus_snapshot()
+            log_modbus_record('snapshot', 'modbus', '', snapshot, 'periodic state')
+        except Exception as exc:
+            log_modbus_record('snapshot_error', detail=str(exc))
+
+        tt.sleep(MODBUS_SNAPSHOT_INTERVAL)
+
+    log_modbus_record('record_loop_stop', detail='Modbus record loop stopped')
 
 def pulse_coil(addr, seconds=0.5):
     write_coil(addr, True)
@@ -238,6 +373,7 @@ def stop_all():
     process_run = False
     machine_repeat_run = False
     write_coils(0, [False] * 30)
+    log_modbus_record('process_stop', detail='All outputs stopped')
     print('All outputs stopped')
 
 # Cell 6: machining center and actuator functions
@@ -255,7 +391,7 @@ MACHINES = {
         'product_name': MC0_PRODUCT_NAME,
     },
     'mc1': {
-        'color': 'green',
+        'color': 'blue',
         'stop': COIL_MC1_STOP,
         'reset': COIL_MC1_RESET,
         'start': COIL_MC1_START,
@@ -423,7 +559,7 @@ def run_machine(name):
 def emit_mc0_blue():
     pulse_coil(COIL_EMITTER_0, EMIT_TIME)
 
-def emit_mc1_green():
+def emit_mc1_blue():
     pulse_coil(COIL_EMITTER_1, EMIT_TIME)
 
 def feed_machine_and_run(name, emit_func):
@@ -474,7 +610,7 @@ def feed_mc0_and_run():
     return feed_machine_and_run('mc0', emit_mc0_blue)
 
 def feed_mc1_and_run():
-    return feed_machine_and_run('mc1', emit_mc1_green)
+    return feed_machine_and_run('mc1', emit_mc1_blue)
 
 def wait_for_input(addr, expected=True, timeout=2.0):
     end_time = tt.time() + timeout
@@ -519,20 +655,20 @@ def handle_sorting(color):
         write_coil(COIL_PUSHER_0, False)
         remove_unknown_product()
 
-# Cell 7: full process - MC0/MC1 together, Vision Sensor blue only pusher
-# MC0 = blue product line, MC1 = green product line.
+# Cell 7: full process - MC0/MC1 together, Vision Sensor blue pusher
+# MC0/MC1 = blue material and processed product lines.
 # MC0 and MC1 run at the same time.
 # Vision Sensor 0 is the final color decision:
-#   Input 0 True  -> blue product -> Pusher 0 Coil 5 ON
-#   Input 0 False -> green product -> Pusher 0 OFF and pass
+#   Input Reg 0 == 1 -> blue material/processed product -> Pusher 0 Coil 5 ON
+#   Input Reg 0 != 1 -> non-blue product -> Pusher 0 OFF and pass
 
 
 def read_vision_sensor_raw():
-    return read_input(BLUE_SENSOR)
+    return read_register(VISION_VALUE_REGISTER)
 
 
 def is_blue_detected():
-    return read_vision_sensor_raw() == BLUE_SENSOR_ACTIVE_STATE
+    return read_vision_sensor_raw() == VISION_BLUE_VALUE
 
 
 def wait_stable_blue_sensor(seconds=SENSOR_CONFIRM_TIME):
@@ -549,24 +685,37 @@ def wait_stable_blue_sensor(seconds=SENSOR_CONFIRM_TIME):
 
 
 def print_vision_sensor_state(raw_value):
+    blue_detected = raw_value == VISION_BLUE_VALUE
+
     if VISION_SENSOR_DEBUG:
         print(
-            'Vision Sensor 0 raw =', raw_value,
-            'active_state =', BLUE_SENSOR_ACTIVE_STATE,
-            'blue_detected =', raw_value == BLUE_SENSOR_ACTIVE_STATE,
+            'Vision Sensor 0 value =', raw_value,
+            'blue_value =', VISION_BLUE_VALUE,
+            'blue_detected =', blue_detected,
         )
 
+    log_modbus_record(
+        'vision_sensor_change',
+        'input_register',
+        VISION_VALUE_REGISTER,
+        raw_value,
+        f'blue_detected={blue_detected}',
+    )
 
-def machine_job(color):
-    if color == 'blue':
+
+def machine_job(name):
+    if name == 'mc0':
+        log_modbus_record('machine_start', detail='mc0 blue material/processed product')
         print('Starting MC0:', MC0_PRODUCT_NAME)
         feed_mc0_and_run()
-        print('MC0 blue processed product released')
-    elif color == 'green':
+        log_modbus_record('machine_done', detail='mc0 blue material/processed product')
+        print('MC0 blue material/processed product released')
+    elif name == 'mc1':
+        log_modbus_record('machine_start', detail='mc1 blue material/processed product')
         print('Starting MC1:', MC1_PRODUCT_NAME)
         feed_mc1_and_run()
-        print('MC1 green processed product released: pusher OFF')
-        write_coil(COIL_PUSHER_0, False)
+        log_modbus_record('machine_done', detail='mc1 blue material/processed product')
+        print('MC1 blue material/processed product released')
 
 
 def wait_until_machines_done(threads, timeout=WAIT_SORT_DONE_TIMEOUT):
@@ -587,16 +736,17 @@ def wait_until_machines_done(threads, timeout=WAIT_SORT_DONE_TIMEOUT):
 
 
 def run_both_machines_once():
-    print('Cycle start: MC0 blue and MC1 green run together')
+    log_modbus_record('cycle_start', detail='MC0/MC1 blue run together')
+    print('Cycle start: MC0/MC1 blue material and processed product run together')
     conveyors_on()
 
-    blue_thread = threading.Thread(target=machine_job, args=('blue',), daemon=True)
-    green_thread = threading.Thread(target=machine_job, args=('green',), daemon=True)
+    blue_thread = threading.Thread(target=machine_job, args=('mc0',), daemon=True)
+    mc1_blue_thread = threading.Thread(target=machine_job, args=('mc1',), daemon=True)
 
     blue_thread.start()
-    green_thread.start()
+    mc1_blue_thread.start()
 
-    wait_until_machines_done([blue_thread, green_thread])
+    wait_until_machines_done([blue_thread, mc1_blue_thread])
     tt.sleep(REPEAT_DELAY)
 
 
@@ -609,59 +759,69 @@ def production_loop():
 
 
 def pulse_pusher_for_blue():
-    # Fixed one-shot cycle: ON once, hold fixed time, OFF once, fixed return time.
-    # This avoids shorter/weak pusher strokes caused by limit sensor timing drift.
-    print('Vision Sensor 0 BLUE -> fixed Pusher 0 cycle')
-
-    conveyors_on()
+    log_modbus_record('pusher_cycle_start', 'coil', COIL_PUSHER_0, 1, 'Pusher 0')
+    print('Vision Sensor 0 BLUE -> Coil 5 Pusher 0 ON for', PUSH_TIME, 'seconds')
     write_coil(COIL_PUSHER_0, True)
-    tt.sleep(PUSH_TIME)
 
+    start_time = tt.time()
+    while process_run and tt.time() - start_time < PUSH_TIME:
+        conveyors_on()
+        write_coil(COIL_PUSHER_0, True)
+        tt.sleep(SCAN_TIME)
+
+    print('Coil 5 Pusher 0 OFF')
     write_coil(COIL_PUSHER_0, False)
-    tt.sleep(PUSH_RETURN_TIME)
-
-    tt.sleep(PUSH_CYCLE_GAP)
-    print('Fixed blue pusher cycle done')
+    wait_for_input(IN_PUSHER_BACK, True, PUSH_RETRACT_TIMEOUT)
+    log_modbus_record('pusher_cycle_done', 'coil', COIL_PUSHER_0, 0, 'Pusher 0')
+    print('Blue product pushed to branch conveyor')
 
 
 def delayed_blue_push_from_vision():
-    global blue_push_busy
+    global blue_push_busy, blue_push_pending
 
-    if blue_push_busy:
-        print('Vision Sensor blue detected, but Pusher 0 is already moving')
-        return
+    while process_run:
+        with blue_push_lock:
+            if blue_push_pending <= 0:
+                blue_push_busy = False
+                break
 
-    blue_push_busy = True
+            blue_push_pending -= 1
 
-    try:
-        conveyors_on()
+        try:
+            conveyors_on()
 
-        if BLUE_TO_PUSHER_DELAY > 0:
-            print('Blue detected: waiting', BLUE_TO_PUSHER_DELAY, 'seconds for pusher timing')
-            start_time = tt.time()
-            while process_run and tt.time() - start_time < BLUE_TO_PUSHER_DELAY:
-                conveyors_on()
-                write_coil(COIL_PUSHER_0, False)
-                tt.sleep(SCAN_TIME)
+            if BLUE_TO_PUSHER_DELAY > 0:
+                print('Blue detected: waiting', BLUE_TO_PUSHER_DELAY, 'seconds for pusher timing')
+                start_time = tt.time()
+                while process_run and tt.time() - start_time < BLUE_TO_PUSHER_DELAY:
+                    conveyors_on()
+                    write_coil(COIL_PUSHER_0, False)
+                    tt.sleep(SCAN_TIME)
 
-        if process_run:
-            pulse_pusher_for_blue()
-            sort_done_event.set()
-            tt.sleep(PUSH_COOLDOWN)
+            if process_run:
+                pulse_pusher_for_blue()
+                sort_done_event.set()
+                tt.sleep(PUSH_COOLDOWN)
 
-    finally:
-        write_coil(COIL_PUSHER_0, False)
-        blue_push_busy = False
+        finally:
+            write_coil(COIL_PUSHER_0, False)
 
 
 def schedule_blue_push_from_vision():
-    global blue_push_thread
+    global blue_push_thread, blue_push_busy, blue_push_pending
 
-    if blue_push_busy:
-        print('Vision Sensor 0 detected blue, but pusher is already busy')
-        return
+    with blue_push_lock:
+        blue_push_pending += 1
+
+        if blue_push_busy:
+            print('Vision Sensor 0 detected BLUE: queued Pusher 0 cycle, pending =', blue_push_pending)
+            log_modbus_record('pusher_queued', 'coil', COIL_PUSHER_0, blue_push_pending, 'Pusher 0 pending cycles')
+            return
+
+        blue_push_busy = True
 
     print('Vision Sensor 0 detected BLUE: scheduling Pusher 0')
+    log_modbus_record('pusher_scheduled', 'coil', COIL_PUSHER_0, 1, 'Pusher 0')
     blue_push_thread = threading.Thread(target=delayed_blue_push_from_vision, daemon=True)
     blue_push_thread.start()
 
@@ -674,13 +834,13 @@ def sorting_loop():
     blue_sensor_latched = False
 
     write_coil(COIL_PUSHER_0, False)
-    print('Sorting loop started: Vision Sensor 0 blue -> Pusher 0, green passes')
+    print('Sorting loop started: Vision Sensor 0 blue from MC0/MC1 -> Pusher 0, non-blue passes')
 
     while process_run:
         conveyors_on()
 
         raw_blue = read_vision_sensor_raw()
-        blue_now = raw_blue == BLUE_SENSOR_ACTIVE_STATE
+        blue_now = raw_blue == VISION_BLUE_VALUE
         exit_sensor = read_input(EXIT_SENSOR)
 
         if raw_blue != prev_raw:
@@ -696,6 +856,7 @@ def sorting_loop():
 
         if exit_sensor and not prev_exit:
             print('Product reached exit')
+            log_modbus_record('product_exit', 'input', EXIT_SENSOR, 1, 'Exit sensor')
             exit_event.set()
 
         if not blue_push_busy:
@@ -706,26 +867,39 @@ def sorting_loop():
 
 
 def factory_process():
-    global process_run, production_thread, sorting_thread
-    global blue_push_busy, blue_sensor_latched, active_machining_count
+    global process_run, production_thread, sorting_thread, modbus_record_thread
+    global blue_push_busy, blue_sensor_latched, blue_push_pending, active_machining_count
 
     process_run = True
     blue_push_busy = False
     blue_sensor_latched = False
+    blue_push_pending = 0
     active_machining_count = 0
     sort_done_event.clear()
     exit_event.clear()
+
+    init_modbus_record_file()
+    log_modbus_record('record_file_created', detail=MODBUS_RECORD_FILE)
 
     reset_machines()
     conveyors_on()
     write_coil(COIL_PUSHER_0, False)
 
-    print('Full process started: MC0/MC1 together, Vision Sensor blue -> Pusher 0')
-    print('BLUE_SENSOR = Input', BLUE_SENSOR, 'active_state =', BLUE_SENSOR_ACTIVE_STATE)
+    print('Full process started: MC0/MC1 together, Vision Sensor blue material/processed product -> Pusher 0')
+    print('VISION_VALUE_REGISTER = Input Reg', VISION_VALUE_REGISTER, 'blue_value =', VISION_BLUE_VALUE)
+    log_modbus_record(
+        'process_start',
+        'input_register',
+        VISION_VALUE_REGISTER,
+        VISION_BLUE_VALUE,
+        'Vision Sensor blue value',
+    )
 
     production_thread = threading.Thread(target=production_loop, daemon=True)
     sorting_thread = threading.Thread(target=sorting_loop, daemon=True)
+    modbus_record_thread = threading.Thread(target=modbus_record_loop, daemon=True)
 
+    modbus_record_thread.start()
     production_thread.start()
     sorting_thread.start()
 
