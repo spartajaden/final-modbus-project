@@ -21,21 +21,20 @@ Python 프로그램이 공장의 제어 역할을 합니다. 센서로 물체 �
 | 파일 | 설명 |
 | --- | --- |
 | `Modbus_project.factoryio` | Factory I/O에서 실행하는 가상 공장 장면 |
-| `pyfa-project.ipynb` | 공장을 제어하는 Python Jupyter Notebook |
+| `pyfa-project.py` | 공장을 제어하는 Python 실행 프로그램 |
 | `요구사항 명세서.md` | 프로젝트 기능과 동작 조건을 정리한 문서 |
-| `프로젝트 결과 보고서.md` | 구현 내용과 결과를 정리한 문서 |
+| `스마트팩토리 자동화 프로젝트 보고서.md` | 구현 내용과 결과를 정리한 문서 |
 
 ## 준비 사항
 
 - Factory I/O
 - Python 3
-- Jupyter Notebook 또는 VS Code의 Jupyter 확장
 - `pymodbus` 라이브러리
 
-`pymodbus`가 설치되어 있지 않다면 터미널에서 아래 명령을 실행합니다.
+프로젝트 폴더의 터미널에서 아래 명령을 실행합니다.
 
 ```bash
-pip install pymodbus
+python -m pip install -r requirements.txt
 ```
 
 ## 실행 방법
@@ -43,10 +42,16 @@ pip install pymodbus
 1. Factory I/O에서 `Modbus_project.factoryio` 파일을 엽니다.
 2. Driver를 **Modbus TCP/IP Server**로 설정합니다.
 3. Factory I/O를 **RUN** 상태로 전환합니다.
-4. `pyfa-project.ipynb` 파일을 엽니다.
-5. 첫 번째 셀의 IP 주소, 포트 번호, Unit ID가 Factory I/O 설정과 같은지 확인합니다.
-6. 노트북 셀을 위에서 아래 순서대로 실행합니다.
-7. `auto_start_factory_io()`가 포함된 자동 운전 시작 셀을 실행합니다.
+4. 프로젝트 폴더에서 터미널을 엽니다.
+5. `pyfa-project.py`의 IP 주소, 포트 번호, Unit ID가 Factory I/O 설정과 같은지 확인합니다.
+6. 아래 명령으로 제어 프로그램을 실행합니다.
+
+
+```bash
+python pyfa-project.py
+```
+
+프로그램은 Factory I/O 연결을 확인한 뒤 `auto_start_factory_io(reset_outputs=True)`를 실행하여 자동 운전을 시작합니다.
 
 기본 통신 설정은 다음과 같습니다.
 
@@ -60,25 +65,21 @@ UNIT_ID = 1
 
 - Factory I/O가 RUN 상태인지 확인합니다.
 - Driver가 **Modbus TCP/IP Server**로 연결되어 있는지 확인합니다.
-- 노트북에 `connected = True`가 출력되는지 확인합니다.
+- 터미널에 `Factory I/O Modbus connected`와 `Factory I/O automatic process started`가 출력되는지 확인합니다.
 - 파란색 물체가 비전 센서를 지난 뒤 푸셔로 밀려 분류되는지 확인합니다.
 - 초록색 물체가 푸셔에 밀리지 않고 다음 공정으로 이동하는지 확인합니다.
 
 ## 공정 정지
 
-공정을 멈추려면 노트북에서 아래 코드를 실행합니다.
+공정을 멈추려면 프로그램을 실행한 터미널에서 `Ctrl+C`를 누릅니다.
 
-```python
-stop_all()
-```
-
-실행하면 컨베이어, 푸셔, 가공기 등의 제어 출력이 정지합니다.
+프로그램은 `stop_all()`을 호출하여 컨베이어, 푸셔, 가공기 등의 제어 출력을 정지하고 연결을 닫습니다.
 
 ## 문제 발생 시 확인할 항목
 
 - Factory I/O가 실행 중이며 RUN 상태인지 확인합니다.
 - Driver가 **Modbus TCP/IP Server**로 설정되어 있는지 확인합니다.
-- IP 주소, Port, Unit ID가 노트북 설정과 같은지 확인합니다.
+- IP 주소, Port, Unit ID가 `pyfa-project.py` 설정과 같은지 확인합니다.
 - 방화벽이 Port `502` 통신을 막고 있지 않은지 확인합니다.
-- Factory I/O의 I/O 주소와 노트북의 I/O 매핑이 같은지 확인합니다.
-- Driver 설정을 변경했다면 노트북 커널을 다시 시작한 뒤 재연결합니다.
+- Factory I/O의 I/O 주소와 `pyfa-project.py`의 I/O 매핑이 같은지 확인합니다.
+- Driver 설정을 변경했다면 실행 중인 프로그램을 종료한 뒤 다시 실행합니다.
