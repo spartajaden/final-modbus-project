@@ -114,6 +114,9 @@ MODBUS_RECORD_EVENTS = {
     'count_started',
     'blue_counted',
     'green_counted',
+    'machine_done',
+    'pusher_cycle_done',
+    'final_production_count',
 }
 
 # Vision Sensor 0 alone decides sorting.
@@ -176,7 +179,7 @@ logged_coil_values = {}
 current_modbus_record_file = MODBUS_RECORD_FILE
 modbus_record_file_started_at = 0.0
 
-MODBUS_RECORD_HEADER = ['datetime', 'blue', 'green']
+MODBUS_RECORD_HEADER = ['datetime', 'event', 'blue', 'green', 'area', 'addr', 'value', 'detail']
 
 COIL_NAMES = {
     COIL_EMITTER_0: 'Emitter 0',
@@ -254,7 +257,16 @@ def log_modbus_record(event, area='', addr='', value='', detail=''):
         return
 
     timestamp = tt.strftime('%Y-%m-%d %H:%M:%S')
-    row = [timestamp, f'blue={blue_material_count}', f'green={green_material_count}']
+    row = [
+        timestamp,
+        event,
+        f'blue={blue_material_count}',
+        f'green={green_material_count}',
+        area,
+        addr,
+        value,
+        detail,
+    ]
 
     with modbus_record_lock:
         ensure_modbus_record_file_exists()
@@ -942,12 +954,18 @@ def sorting_loop():
 
     prev_exit = False
     prev_raw = None
+    prev_blue_count_sensor = read_input(BLUE_COUNT_SENSOR)
+    prev_green_count_sensor = read_input(GREEN_COUNT_SENSOR)
+    blue_count_idle_state = prev_blue_count_sensor
+    green_count_idle_state = prev_green_count_sensor
+    blue_count_armed = True
+    green_count_armed = True
     blue_sensor_latched = False
     green_sensor_latched = False
 
     write_coil(COIL_PUSHER_0, False)
     print('Sorting loop started: blue -> Pusher 0, green -> pass')
-    print('Material counts use Vision Sensor 0 color latches')
+    print('Material counts use Retroreflective Sensor 0 for blue and Sensor 5 for green')
 
     while process_run:
         conveyors_on()
@@ -956,6 +974,19 @@ def sorting_loop():
         blue_now = raw_blue == VISION_BLUE_VALUE
         green_now = raw_blue == VISION_GREEN_VALUE
         exit_sensor = read_input(EXIT_SENSOR)
+        (
+            prev_blue_count_sensor,
+            prev_green_count_sensor,
+            blue_count_armed,
+            green_count_armed,
+        ) = update_material_counts(
+            prev_blue_count_sensor,
+            prev_green_count_sensor,
+            blue_count_idle_state,
+            green_count_idle_state,
+            blue_count_armed,
+            green_count_armed,
+        )
 
         if raw_blue != prev_raw:
             print_vision_sensor_state(raw_blue)
@@ -966,14 +997,12 @@ def sorting_loop():
 
             if not blue_sensor_latched:
                 blue_sensor_latched = True
-                count_blue_from_vision()
                 schedule_blue_push_from_vision()
         elif green_now:
             blue_sensor_latched = False
 
             if not green_sensor_latched:
                 green_sensor_latched = True
-                count_green_from_vision()
                 print('Vision Sensor 0 detected GREEN: pusher OFF, product passes')
                 log_modbus_record('green_passed', 'input_register', VISION_VALUE_REGISTER, raw_blue, 'Pusher 0 OFF')
 

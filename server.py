@@ -7,6 +7,8 @@ Factory I/O must be in RUN mode with the Modbus TCP/IP Server driver enabled.
 """
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import csv
+from datetime import datetime
 import importlib.util
 import json
 import mimetypes
@@ -23,6 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 
 CONTROL_LOCK = threading.Lock()
+SERVER_ENABLED = True
 
 
 def load_process_module():
@@ -45,7 +48,7 @@ def thread_alive(thread):
 
 def build_status():
     return {
-        "server_running": True,
+        "server_running": SERVER_ENABLED,
         "connected": bool(process.connected),
         "running": bool(process.process_run),
         "counts": {
@@ -68,7 +71,7 @@ def build_status():
 
 def read_snapshot():
     status = build_status()
-    if not status["connected"]:
+    if not status["server_running"] or not status["connected"]:
         return {
             "status": status,
             "modbus": None,
@@ -96,6 +99,125 @@ def list_record_files():
     ]
 
 
+def seconds_between_events(times):
+    if len(times) < 2:
+        return None
+
+    intervals = [
+        (current - previous).total_seconds()
+        for previous, current in zip(times, times[1:])
+        if current >= previous
+    ]
+    if not intervals:
+        return None
+    return sum(intervals) / len(intervals)
+
+
+def parse_count_value(value):
+    try:
+        return int(str(value).split("=", 1)[-1])
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_int_value(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def summarize_record_file(file_path):
+    summary = {
+        "machine_done_count": 0,
+        "machine_avg_seconds": None,
+        "pusher_done_count": 0,
+        "pusher_avg_seconds": None,
+        "final_blue_count": None,
+        "final_green_count": None,
+        "final_total_count": None,
+        "final_recorded_at": None,
+    }
+
+    machine_times_by_detail = {}
+    pusher_times = []
+
+    try:
+        with file_path.open("r", newline="", encoding="utf-8") as record_file:
+            reader = csv.DictReader(record_file)
+            if "event" not in (reader.fieldnames or []):
+                return summary
+
+            for row in reader:
+                event = row.get("event", "")
+                if event not in {"machine_done", "pusher_cycle_done", "final_production_count"}:
+                    continue
+
+                try:
+                    event_time = datetime.strptime(row.get("datetime", ""), "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+
+                if event == "machine_done":
+                    detail = row.get("detail", "") or "machine"
+                    machine_times_by_detail.setdefault(detail, []).append(event_time)
+                elif event == "pusher_cycle_done":
+                    pusher_times.append(event_time)
+                elif event == "final_production_count":
+                    summary["final_blue_count"] = parse_count_value(row.get("blue", ""))
+                    summary["final_green_count"] = parse_count_value(row.get("green", ""))
+                    summary["final_total_count"] = parse_int_value(row.get("value", ""))
+                    summary["final_recorded_at"] = row.get("datetime", "")
+    except OSError:
+        return summary
+
+    machine_intervals = []
+    machine_done_count = 0
+    for machine_times in machine_times_by_detail.values():
+        machine_done_count += len(machine_times)
+        machine_intervals.extend(
+            (current - previous).total_seconds()
+            for previous, current in zip(machine_times, machine_times[1:])
+            if current >= previous
+        )
+
+    summary["machine_done_count"] = machine_done_count
+    summary["machine_avg_seconds"] = (
+        sum(machine_intervals) / len(machine_intervals)
+        if machine_intervals
+        else None
+    )
+    summary["pusher_done_count"] = len(pusher_times)
+    summary["pusher_avg_seconds"] = seconds_between_events(pusher_times)
+    if summary["final_total_count"] is None:
+        final_blue = summary["final_blue_count"]
+        final_green = summary["final_green_count"]
+        if final_blue is not None and final_green is not None:
+            summary["final_total_count"] = final_blue + final_green
+    return summary
+
+
+def build_records_payload():
+    files = list_record_files()
+    latest_file = find_record_file(files[0]["name"]) if files else None
+    final_summary = None
+
+    for file_info in files:
+        record_file = find_record_file(file_info["name"])
+        if record_file is None:
+            continue
+        summary = summarize_record_file(record_file)
+        if summary["final_total_count"] is not None:
+            final_summary = summary
+            break
+
+    return {
+        "files": files,
+        "summary": summarize_record_file(latest_file) if latest_file else None,
+        "final_summary": final_summary,
+    }
+
+
 def find_record_file(name):
     requested = Path(unquote(name)).name
     if not requested.startswith("modbus_records") or not requested.endswith(".csv"):
@@ -121,12 +243,38 @@ def disconnect_factory_io():
     return build_status()
 
 
+def append_final_production_count(file_path, timestamp):
+    file_path = Path(file_path)
+    if not file_path.name.startswith("modbus_records") or not file_path.exists():
+        return
+
+    need_header = file_path.stat().st_size == 0
+    row = [
+        process.tt.strftime("%Y-%m-%d %H:%M:%S", process.tt.localtime(timestamp)),
+        "final_production_count",
+        f"blue={process.blue_material_count}",
+        f"green={process.green_material_count}",
+        "summary",
+        "",
+        process.blue_material_count + process.green_material_count,
+        "3-hour CSV period final production count",
+    ]
+
+    with file_path.open("a", newline="", encoding="utf-8") as record_file:
+        writer = csv.writer(record_file)
+        if need_header:
+            writer.writerow(process.MODBUS_RECORD_HEADER)
+        writer.writerow(row)
+
+
 def create_record_file():
     if not process.MODBUS_RECORD_ENABLED:
         raise RuntimeError("Modbus record is disabled")
 
     now = process.tt.time()
     with process.modbus_record_lock:
+        previous_file = BASE_DIR / Path(process.current_modbus_record_file).name
+        append_final_production_count(previous_file, now)
         process.modbus_record_file_started_at = now
         process.current_modbus_record_file = process.make_modbus_record_filename(now)
         process.write_modbus_record_header(process.current_modbus_record_file)
@@ -155,6 +303,8 @@ def delete_record_file(name):
 
 
 def prepare_server_shutdown():
+    global SERVER_ENABLED
+
     try:
         process.stop_all()
     except Exception as exc:
@@ -167,11 +317,25 @@ def prepare_server_shutdown():
     finally:
         process.connected = False
 
+    SERVER_ENABLED = False
+
+    status = build_status()
+    status["shutdown"] = True
+    status["message"] = "Web server control is stopped."
+    return status
+
     return {
         "server_running": False,
         "shutdown": True,
         "message": "웹 서버를 종료합니다.",
     }
+
+
+def prepare_server_start():
+    global SERVER_ENABLED
+
+    SERVER_ENABLED = True
+    return build_status()
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -213,7 +377,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/records":
-            self.send_json({"files": list_record_files()})
+            self.send_json(build_records_payload())
             return
 
         if path == "/api/records/latest":
@@ -239,6 +403,23 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
 
         try:
+            if path == "/api/server/start":
+                with CONTROL_LOCK:
+                    status = prepare_server_start()
+                self.send_json(status)
+                return
+
+            if not SERVER_ENABLED and path != "/api/shutdown":
+                self.send_json(
+                    {
+                        "error": "Web server control is stopped.",
+                        "code": "server_process_off",
+                        "status": build_status(),
+                    },
+                    status=503,
+                )
+                return
+
             if path == "/api/connect" or path == "/connect":
                 try:
                     with CONTROL_LOCK:
@@ -283,7 +464,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 with CONTROL_LOCK:
                     payload = prepare_server_shutdown()
                 self.send_json(payload)
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
 
             self.send_json({"error": "not found"}, status=404)

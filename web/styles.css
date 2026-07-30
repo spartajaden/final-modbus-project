@@ -363,9 +363,9 @@ button:disabled {
 .report-summary {
   display: grid;
   gap: 14px;
-  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
   margin-top: 22px;
-  max-width: 820px;
+  max-width: 1030px;
 }
 
 .report-card {
@@ -407,22 +407,22 @@ button:disabled {
   background: #ffffff;
   border: 1px solid #e5e7eb;
   border-radius: 7px;
-  height: 315px;
+  height: 316px;
   margin-top: 0;
-  padding: 16px 14px 10px;
+  padding: 14px 10px 8px;
 }
 
 #countChart {
   display: block;
-  height: 285px;
+  height: 292px;
   width: 100%;
 }
 
 .chart-legend {
   align-items: center;
   display: flex;
-  gap: 22px;
-  margin-top: 20px;
+  gap: 18px;
+  margin-top: 18px;
   padding-left: 12px;
 }
 
@@ -450,7 +450,7 @@ button:disabled {
 }
 
 .legend-item strong {
-  font-weight: 700;
+  display: none;
 }
 
 .events-title {

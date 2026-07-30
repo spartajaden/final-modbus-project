@@ -2,9 +2,12 @@ const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
 
 const state = {
   busy: false,
+  serverRunning: true,
   connected: false,
   running: false,
   history: [],
+  recordSummary: null,
+  finalSummary: null,
   nextRecordAt: Date.now() + THREE_HOURS_MS,
 };
 
@@ -31,6 +34,8 @@ const els = {
   greenCount: document.querySelector("#greenCount"),
   blueReportCount: document.querySelector("#blueReportCount"),
   greenReportCount: document.querySelector("#greenReportCount"),
+  finalTotalCount: document.querySelector("#finalTotalCount"),
+  finalCountDetail: document.querySelector("#finalCountDetail"),
   reportRange: document.querySelector("#reportRange"),
   machineAvg: document.querySelector("#machineAvg"),
   machineDoneCount: document.querySelector("#machineDoneCount"),
@@ -45,11 +50,11 @@ const els = {
 
 function setBusy(isBusy) {
   state.busy = isBusy;
-  els.connectBtn.disabled = isBusy;
-  els.startBtn.disabled = isBusy || !state.connected;
-  els.stopBtn.disabled = isBusy || (!state.connected && !state.running);
+  els.connectBtn.disabled = isBusy || !state.serverRunning;
+  els.startBtn.disabled = isBusy || !state.serverRunning || !state.connected;
+  els.stopBtn.disabled = isBusy || !state.serverRunning || (!state.connected && !state.running);
   els.shutdownServerBtn.disabled = isBusy;
-  els.createRecordBtn.disabled = isBusy;
+  els.createRecordBtn.disabled = isBusy || !state.serverRunning;
 }
 
 function showToast(message) {
@@ -123,17 +128,28 @@ async function createRecordFile(isAutomatic = false) {
 }
 
 async function shutdownWebServer() {
-  if (!window.confirm("웹 서버를 종료할까요? 종료 후에는 이 페이지를 새로 열 수 없습니다.")) {
+  if (!state.serverRunning) {
+    try {
+      setBusy(true);
+      const status = await requestJson("/api/server/start", { method: "POST" });
+      renderStatus(status);
+      showToast("웹 서버를 시작했습니다.");
+    } catch (error) {
+      showToast(error.message);
+    } finally {
+      setBusy(false);
+    }
+    return;
+  }
+
+  if (!window.confirm("웹 서버를 종료할까요? 종료 후에는 시작 버튼으로 다시 켤 수 있습니다.")) {
     return;
   }
 
   try {
     setBusy(true);
-    await requestJson("/api/shutdown", { method: "POST" });
-    state.connected = false;
-    state.running = false;
-    renderBadge(els.connectionBadge, "서버 꺼짐", "warn");
-    renderBadge(els.runBadge, "Stopped", "off");
+    const payload = await requestJson("/api/shutdown", { method: "POST" });
+    renderStatus(payload);
     els.connectBtn.textContent = "연결";
     showToast("웹 서버를 종료했습니다.");
   } catch (error) {
@@ -172,22 +188,27 @@ function renderBadge(element, text, mode) {
 }
 
 function renderStatus(status, snapshot = null) {
+  const serverRunning = status.server_running !== false;
   const connected = Boolean(status.connected);
+  state.serverRunning = serverRunning;
   state.connected = connected;
   state.running = Boolean(status.running);
 
   renderBadge(
     els.connectionBadge,
-    connected ? "Modbus connected" : "Click Connect",
-    connected ? "on" : "warn",
+    serverRunning ? (connected ? "Modbus connected" : "Click Connect") : "서버 꺼짐",
+    serverRunning && connected ? "on" : "warn",
   );
   els.connectBtn.textContent = connected ? "연결 해제" : "연결";
   els.connectBtn.classList.toggle("danger", connected);
   els.connectBtn.classList.toggle("secondary", !connected);
+  els.shutdownServerBtn.textContent = serverRunning ? "웹 서버 종료" : "웹 서버 시작";
+  els.shutdownServerBtn.classList.toggle("danger", serverRunning);
+  els.shutdownServerBtn.classList.toggle("primary", !serverRunning);
   renderBadge(
     els.runBadge,
-    state.running ? "Running" : "Stopped",
-    state.running ? "on" : "off",
+    serverRunning && state.running ? "Running" : "Stopped",
+    serverRunning && state.running ? "on" : "off",
   );
 
   els.factoryScene.classList.toggle("running", state.running);
@@ -214,8 +235,10 @@ function renderStatus(status, snapshot = null) {
   updateReportStats();
 
   if (!state.busy) {
-    els.startBtn.disabled = !connected;
-    els.stopBtn.disabled = !connected && !state.running;
+    els.connectBtn.disabled = !serverRunning;
+    els.startBtn.disabled = !serverRunning || !connected;
+    els.stopBtn.disabled = !serverRunning || (!connected && !state.running);
+    els.createRecordBtn.disabled = !serverRunning;
   }
 }
 
@@ -248,7 +271,6 @@ function updateReportStats(fileCount = null) {
   const last = history[history.length - 1];
   const blue = Number(els.blueCount.textContent || 0);
   const green = Number(els.greenCount.textContent || 0);
-  const total = blue + green;
   const rangeText = first && last
     ? `${formatFullDate(first.time)} ~ ${formatFullDate(last.time)}`
     : "-";
@@ -257,12 +279,18 @@ function updateReportStats(fileCount = null) {
   els.reportRange.dataset.csvCount = String(csvCount);
   els.reportRange.textContent = `기록 범위: ${rangeText} · CSV ${csvCount}개`;
 
-  const elapsedSeconds = first && last ? Math.max(0, (last.time - first.time) / 1000) : 0;
-  const machineDone = total > 0 ? total : 0;
-  const pusherDone = blue > 0 ? blue : 0;
-  const machineAvg = machineDone > 1 && elapsedSeconds > 0 ? elapsedSeconds / machineDone : null;
-  const pusherAvg = pusherDone > 1 && elapsedSeconds > 0 ? elapsedSeconds / pusherDone : null;
+  const summary = state.recordSummary || {};
+  const finalSummary = state.finalSummary || summary;
+  const finalBlue = Number.isFinite(finalSummary.final_blue_count) ? finalSummary.final_blue_count : blue;
+  const finalGreen = Number.isFinite(finalSummary.final_green_count) ? finalSummary.final_green_count : green;
+  const finalTotal = Number.isFinite(finalSummary.final_total_count) ? finalSummary.final_total_count : finalBlue + finalGreen;
+  const machineDone = Number(summary.machine_done_count ?? 0);
+  const pusherDone = Number(summary.pusher_done_count ?? 0);
+  const machineAvg = Number.isFinite(summary.machine_avg_seconds) ? summary.machine_avg_seconds : null;
+  const pusherAvg = Number.isFinite(summary.pusher_avg_seconds) ? summary.pusher_avg_seconds : null;
 
+  els.finalTotalCount.textContent = finalTotal;
+  els.finalCountDetail.textContent = `Blue ${finalBlue} · Green ${finalGreen}`;
   els.machineAvg.textContent = machineAvg ? `${machineAvg.toFixed(2)} s` : "-";
   els.machineDoneCount.textContent = `${machineDone}회 완료`;
   els.pusherAvg.textContent = pusherAvg ? `${pusherAvg.toFixed(2)} s` : "-";
@@ -274,6 +302,7 @@ function updateReportStats(fileCount = null) {
     ["green_counted", green],
     ["machine_done", machineDone],
     ["pusher_cycle_done", pusherDone],
+    ["final_production_count", finalTotal],
   ];
 
   els.eventTableBody.innerHTML = rows
@@ -292,10 +321,10 @@ function drawChart() {
 
   const width = rect.width;
   const height = rect.height;
-  const leftPad = 46;
-  const rightPad = 72;
-  const topPad = 22;
-  const bottomPad = 42;
+  const leftPad = 42;
+  const rightPad = 36;
+  const topPad = 34;
+  const bottomPad = 50;
   const plotLeft = leftPad;
   const plotRight = width - rightPad;
   const plotTop = topPad;
@@ -303,17 +332,17 @@ function drawChart() {
   const plotWidth = plotRight - plotLeft;
   const plotHeight = plotBottom - plotTop;
   const history = state.history.length ? state.history : [{ time: new Date(), blue: 0, green: 0 }];
-  const maxSeen = Math.max(1, ...history.flatMap((item) => [item.blue, item.green]));
-  const maxValue = Math.max(10, Math.ceil((maxSeen + 1) / 2) * 2);
+  const maxSeen = Math.max(0, ...history.flatMap((item) => [item.blue, item.green]));
+  const maxValue = Math.max(14, Math.ceil(maxSeen));
 
   ctx.clearRect(0, 0, width, height);
 
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
 
-  ctx.strokeStyle = "#e8edf3";
+  ctx.strokeStyle = "#e7ecf2";
   ctx.lineWidth = 1;
-  const yStep = maxValue <= 12 ? 1 : 2;
+  const yStep = maxValue <= 18 ? 1 : 2;
   for (let value = 0; value <= maxValue; value += yStep) {
     const y = plotBottom - (value / maxValue) * plotHeight;
     ctx.beginPath();
@@ -342,39 +371,9 @@ function drawChart() {
     return plotBottom - (value / maxValue) * plotHeight;
   }
 
-  function drawArea(key, color) {
-    if (!history.length) {
-      return;
-    }
-    const gradient = ctx.createLinearGradient(0, plotTop, 0, plotBottom);
-    gradient.addColorStop(0, color.replace("1)", "0.18)"));
-    gradient.addColorStop(1, color.replace("1)", "0.02)"));
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.moveTo(xFor(0), plotBottom);
-    history.forEach((item, index) => {
-      const x = xFor(index);
-      const y = yFor(item[key]);
-      if (index === 0) {
-        ctx.lineTo(x, y);
-      } else {
-        const previous = history[index - 1];
-        const prevX = xFor(index - 1);
-        const prevY = yFor(previous[key]);
-        const midX = prevX + (x - prevX) * 0.5;
-        ctx.lineTo(midX, prevY);
-        ctx.lineTo(midX, y);
-        ctx.lineTo(x, y);
-      }
-    });
-    ctx.lineTo(xFor(history.length - 1), plotBottom);
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  function drawStepLine(key, color, labelOffset) {
+  function drawLine(key, color) {
     ctx.strokeStyle = color;
-    ctx.lineWidth = 3.2;
+    ctx.lineWidth = 3;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.beginPath();
@@ -384,39 +383,14 @@ function drawChart() {
       if (index === 0) {
         ctx.moveTo(x, y);
       } else {
-        const previous = history[index - 1];
-        const prevX = xFor(index - 1);
-        const prevY = yFor(previous[key]);
-        const midX = prevX + (x - prevX) * 0.5;
-        ctx.lineTo(midX, prevY);
-        ctx.lineTo(midX, y);
         ctx.lineTo(x, y);
       }
     });
     ctx.stroke();
-
-    const last = history[history.length - 1];
-    const lastX = xFor(history.length - 1);
-    const lastY = yFor(last[key]);
-    ctx.fillStyle = "#ffffff";
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(lastX, lastY, 4.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.fillStyle = color;
-    ctx.font = "700 12px Segoe UI, Arial";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-    ctx.fillText(`${key === "blue" ? "Blue" : "Green"} ${last[key]}`, lastX + 10, lastY + labelOffset);
   }
 
-  drawArea("green", "rgba(37, 166, 106, 1)");
-  drawArea("blue", "rgba(47, 126, 216, 1)");
-  drawStepLine("green", "#25a66a", -12);
-  drawStepLine("blue", "#2f7ed8", 12);
+  drawLine("blue", "#2f7ed8");
+  drawLine("green", "#25a66a");
 
   ctx.strokeStyle = "#d4dae3";
   ctx.lineWidth = 1;
@@ -501,6 +475,8 @@ async function refreshRecords() {
   try {
     const payload = await requestJson("/api/records");
     const files = payload.files || [];
+    state.recordSummary = payload.summary || null;
+    state.finalSummary = payload.final_summary || null;
     els.downloadLatestBtn.disabled = files.length === 0;
     updateReportStats(files.length);
 
