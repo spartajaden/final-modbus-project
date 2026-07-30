@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory I/O Control</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Modbus TCP/IP</p>
+          <h1>Factory I/O 공정 제어</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="connectionBadge" class="status-badge off">연결 대기</span>
+          <button id="connectBtn" class="secondary">연결</button>
+          <button id="startBtn" class="primary">시작</button>
+          <button id="stopBtn" class="danger">멈춤</button>
+        </div>
+      </header>
+
+      <main class="dashboard">
+        <section class="process-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Processing View</p>
+              <h2>가공 화면</h2>
+            </div>
+            <span id="runBadge" class="status-badge off">정지</span>
+          </div>
+
+          <div id="factoryScene" class="factory-scene stopped">
+            <div class="machine mc0">
+              <span class="machine-label">MC0</span>
+              <strong>파란 제품 가공</strong>
+              <span id="productionLamp" class="lamp"></span>
+            </div>
+            <div class="machine mc1">
+              <span class="machine-label">MC1</span>
+              <strong>초록 제품 가공</strong>
+              <span id="sortingLamp" class="lamp"></span>
+            </div>
+
+            <div class="conveyor conveyor-top">
+              <div class="belt-lines"></div>
+              <div class="product blue-product"></div>
+            </div>
+            <div class="conveyor conveyor-bottom">
+              <div class="belt-lines"></div>
+              <div class="product green-product"></div>
+            </div>
+
+            <div id="pusherArm" class="pusher">
+              <span>푸셔</span>
+            </div>
+
+            <div class="exit-zone">
+              <span>분류 출구</span>
+            </div>
+          </div>
+        </section>
+
+        <aside class="status-panel">
+          <div class="section-head compact">
+            <div>
+              <p class="eyebrow">Live Status</p>
+              <h2>상태</h2>
+            </div>
+          </div>
+          <dl class="status-grid">
+            <div>
+              <dt>대상 IP</dt>
+              <dd id="targetIp">-</dd>
+            </div>
+            <div>
+              <dt>포트</dt>
+              <dd id="targetPort">-</dd>
+            </div>
+            <div>
+              <dt>Vision 값</dt>
+              <dd id="visionValue">-</dd>
+            </div>
+            <div>
+              <dt>감지 색상</dt>
+              <dd id="detectedColor">-</dd>
+            </div>
+            <div>
+              <dt>푸셔</dt>
+              <dd id="pusherState">-</dd>
+            </div>
+            <div>
+              <dt>기록 파일</dt>
+              <dd id="recordFile">-</dd>
+            </div>
+          </dl>
+        </aside>
+
+        <section class="chart-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Production Data</p>
+              <h2>데이터 시각화</h2>
+            </div>
+            <div class="counter-pair">
+              <span class="counter blue">Blue <strong id="blueCount">0</strong></span>
+              <span class="counter green">Green <strong id="greenCount">0</strong></span>
+            </div>
+          </div>
+          <canvas id="countChart" width="900" height="320"></canvas>
+        </section>
+
+        <section class="records-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">CSV Records</p>
+              <h2>CSV 다운로드</h2>
+            </div>
+            <div class="record-actions">
+              <button id="createRecordBtn" class="secondary">새 CSV 생성</button>
+              <button id="downloadLatestBtn" class="secondary">최신 CSV 다운로드</button>
+            </div>
+          </div>
+          <p id="recordTimer" class="record-timer">다음 자동 CSV 생성까지 계산 중</p>
+          <div id="recordList" class="record-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

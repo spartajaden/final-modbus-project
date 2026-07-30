@@ -14,13 +14,12 @@ import os
 import time as tt
 import threading
 
-IP_ADDRESS = '210.119.14.58'
+IP_ADDRESS = '210.119.14.76'
 PORT = 502
 UNIT_ID = 1
 
 client = ModbusTcpClient(IP_ADDRESS, port=PORT)
-connected = client.connect()
-print('connected =', connected)
+connected = False
 
 # Cell 2: I/O mapping from Factory I/O driver
 # Updated for the current Factory I/O driver screen.
@@ -103,32 +102,18 @@ EXIT_SENSOR = IN_SENSOR_4
 # Retroreflective Sensor 0 counts blue materials, Sensor 5 counts green materials.
 BLUE_COUNT_SENSOR = IN_SENSOR_0
 GREEN_COUNT_SENSOR = IN_SENSOR_5
+COUNT_STARTUP_IGNORE_TIME = 2.0
+COLOR_COUNT_COOLDOWN = 1.0
 
 VISION_SENSOR_DEBUG = True
 MODBUS_RECORD_ENABLED = True
 MODBUS_RECORD_FILE = 'modbus_records.csv'
 MODBUS_RECORD_RESET_ON_START = True
 MODBUS_SNAPSHOT_INTERVAL = 0.20
-MODBUS_RECORD_SPLIT_HOURS = 3
 MODBUS_RECORD_EVENTS = {
-    'record_file_created',
-    'process_start',
-    'process_stop',
-    'cycle_start',
-    'state_change',
-    'snapshot_error',
-    'vision_sensor_change',
-    'green_passed',
+    'count_started',
     'blue_counted',
     'green_counted',
-    'machine_start',
-    'machine_done',
-    'pusher_scheduled',
-    'pusher_queued',
-    'pusher_cycle_start',
-    'pusher_cycle_done',
-    'product_exit',
-    'record_loop_stop',
 }
 
 # Vision Sensor 0 alone decides sorting.
@@ -179,6 +164,8 @@ blue_sensor_latched = False
 blue_push_pending = 0
 blue_material_count = 0
 green_material_count = 0
+last_blue_counted_at = 0.0
+last_green_counted_at = 0.0
 blue_push_lock = threading.Lock()
 sort_done_event = threading.Event()
 exit_event = threading.Event()
@@ -189,7 +176,7 @@ logged_coil_values = {}
 current_modbus_record_file = MODBUS_RECORD_FILE
 modbus_record_file_started_at = 0.0
 
-MODBUS_RECORD_HEADER = ['datetime', 'event', 'area', 'value', 'detail']
+MODBUS_RECORD_HEADER = ['datetime', 'blue', 'green']
 
 COIL_NAMES = {
     COIL_EMITTER_0: 'Emitter 0',
@@ -233,24 +220,17 @@ def write_modbus_record_header(file_path):
         writer = csv.writer(log_file)
         writer.writerow(MODBUS_RECORD_HEADER)
 
-def rotate_modbus_record_file_if_needed(now=None):
+def ensure_modbus_record_file_exists(now=None):
     global current_modbus_record_file, modbus_record_file_started_at
 
     if now is None:
         now = tt.time()
-
-    split_seconds = MODBUS_RECORD_SPLIT_HOURS * 60 * 60
 
     if modbus_record_file_started_at <= 0:
         modbus_record_file_started_at = now
         current_modbus_record_file = make_modbus_record_filename(now)
         write_modbus_record_header(current_modbus_record_file)
         return
-
-    if split_seconds > 0 and now - modbus_record_file_started_at >= split_seconds:
-        modbus_record_file_started_at = now
-        current_modbus_record_file = make_modbus_record_filename(now)
-        write_modbus_record_header(current_modbus_record_file)
 
 def init_modbus_record_file(reset_file=MODBUS_RECORD_RESET_ON_START):
     global current_modbus_record_file, modbus_record_file_started_at
@@ -274,10 +254,10 @@ def log_modbus_record(event, area='', addr='', value='', detail=''):
         return
 
     timestamp = tt.strftime('%Y-%m-%d %H:%M:%S')
-    row = [timestamp, event, area, value, detail]
+    row = [timestamp, f'blue={blue_material_count}', f'green={green_material_count}']
 
     with modbus_record_lock:
-        rotate_modbus_record_file_if_needed()
+        ensure_modbus_record_file_exists()
         need_header = not os.path.exists(current_modbus_record_file) or os.path.getsize(current_modbus_record_file) == 0
 
         with open(current_modbus_record_file, 'a', newline='', encoding='utf-8') as log_file:
@@ -393,23 +373,67 @@ def read_modbus_snapshot():
         'pusher_busy': blue_push_busy,
     }
 
-def update_material_counts(prev_blue_sensor, prev_green_sensor):
+def count_blue_from_vision():
+    global blue_material_count, last_blue_counted_at
+
+    now = tt.time()
+    if now - last_blue_counted_at < COLOR_COUNT_COOLDOWN:
+        return
+
+    blue_material_count += 1
+    last_blue_counted_at = now
+    print('Blue material count =', blue_material_count)
+    log_modbus_record('blue_counted', 'input_register', VISION_VALUE_REGISTER, blue_material_count, 'Vision Sensor 0 blue')
+
+def count_green_from_vision():
+    global green_material_count, last_green_counted_at
+
+    now = tt.time()
+    if now - last_green_counted_at < COLOR_COUNT_COOLDOWN:
+        return
+
+    green_material_count += 1
+    last_green_counted_at = now
+    print('Green material count =', green_material_count)
+    log_modbus_record('green_counted', 'input_register', VISION_VALUE_REGISTER, green_material_count, 'Vision Sensor 0 green')
+
+def update_material_counts(
+    prev_blue_sensor,
+    prev_green_sensor,
+    blue_idle_state,
+    green_idle_state,
+    blue_count_armed,
+    green_count_armed,
+):
     global blue_material_count, green_material_count
 
     blue_sensor = read_input(BLUE_COUNT_SENSOR)
     green_sensor = read_input(GREEN_COUNT_SENSOR)
 
-    if blue_sensor and not prev_blue_sensor:
+    blue_detected = blue_sensor != blue_idle_state
+    prev_blue_detected = prev_blue_sensor != blue_idle_state
+    green_detected = green_sensor != green_idle_state
+    prev_green_detected = prev_green_sensor != green_idle_state
+
+    if not blue_detected:
+        blue_count_armed = True
+
+    if not green_detected:
+        green_count_armed = True
+
+    if blue_detected and not prev_blue_detected and blue_count_armed:
         blue_material_count += 1
+        blue_count_armed = False
         print('Blue material count =', blue_material_count)
         log_modbus_record('blue_counted', 'input', BLUE_COUNT_SENSOR, blue_material_count, 'Retroreflective Sensor 0')
 
-    if green_sensor and not prev_green_sensor:
+    if green_detected and not prev_green_detected and green_count_armed:
         green_material_count += 1
+        green_count_armed = False
         print('Green material count =', green_material_count)
         log_modbus_record('green_counted', 'input', GREEN_COUNT_SENSOR, green_material_count, 'Retroreflective Sensor 5')
 
-    return blue_sensor, green_sensor
+    return blue_sensor, green_sensor, blue_count_armed, green_count_armed
 
 def modbus_record_loop():
     print('Modbus record loop started:', current_modbus_record_file)
@@ -910,13 +934,12 @@ def sorting_loop():
 
     prev_exit = False
     prev_raw = None
-    prev_blue_count_sensor = read_input(BLUE_COUNT_SENSOR)
-    prev_green_count_sensor = read_input(GREEN_COUNT_SENSOR)
     blue_sensor_latched = False
     green_sensor_latched = False
 
     write_coil(COIL_PUSHER_0, False)
     print('Sorting loop started: blue -> Pusher 0, green -> pass')
+    print('Material counts use Vision Sensor 0 color latches')
 
     while process_run:
         conveyors_on()
@@ -935,12 +958,14 @@ def sorting_loop():
 
             if not blue_sensor_latched:
                 blue_sensor_latched = True
+                count_blue_from_vision()
                 schedule_blue_push_from_vision()
         elif green_now:
             blue_sensor_latched = False
 
             if not green_sensor_latched:
                 green_sensor_latched = True
+                count_green_from_vision()
                 print('Vision Sensor 0 detected GREEN: pusher OFF, product passes')
                 log_modbus_record('green_passed', 'input_register', VISION_VALUE_REGISTER, raw_blue, 'Pusher 0 OFF')
 
@@ -955,11 +980,6 @@ def sorting_loop():
             log_modbus_record('product_exit', 'input', EXIT_SENSOR, 1, 'Exit sensor')
             exit_event.set()
 
-        prev_blue_count_sensor, prev_green_count_sensor = update_material_counts(
-            prev_blue_count_sensor,
-            prev_green_count_sensor,
-        )
-
         if not blue_push_busy:
             write_coil(COIL_PUSHER_0, False)
 
@@ -971,6 +991,7 @@ def factory_process():
     global process_run, production_thread, sorting_thread, modbus_record_thread
     global blue_push_busy, blue_sensor_latched, blue_push_pending, active_machining_count
     global blue_material_count, green_material_count
+    global last_blue_counted_at, last_green_counted_at
 
     process_run = True
     blue_push_busy = False
@@ -978,12 +999,15 @@ def factory_process():
     blue_push_pending = 0
     blue_material_count = 0
     green_material_count = 0
+    last_blue_counted_at = 0.0
+    last_green_counted_at = 0.0
     active_machining_count = 0
     sort_done_event.clear()
     exit_event.clear()
 
     init_modbus_record_file()
     log_modbus_record('record_file_created', detail=current_modbus_record_file)
+    log_modbus_record('count_started', detail='Initial material counts')
 
     reset_machines()
     conveyors_on()
