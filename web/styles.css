@@ -134,6 +134,10 @@ button:disabled {
   grid-column: 1 / -1;
 }
 
+.chart-panel {
+  padding: 28px 32px;
+}
+
 .status-badge {
   align-items: center;
   border-radius: 999px;
@@ -340,39 +344,146 @@ button:disabled {
 .status-grid dd {
   font-weight: 800;
   margin: 0;
-  max-width: 190px;
   overflow-wrap: anywhere;
   text-align: right;
 }
 
-.counter-pair {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+.report-header h2 {
+  font-size: 30px;
+  line-height: 1.2;
+  margin: 0 0 16px;
 }
 
-.counter {
-  border-radius: 999px;
-  color: white;
-  display: inline-flex;
+.report-header p {
+  color: #64748b;
+  font-size: 15px;
+  margin: 0;
+}
+
+.report-summary {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  margin-top: 22px;
+  max-width: 820px;
+}
+
+.report-card {
+  background: #f3f6fb;
+  border: 1px solid #eef2f7;
+  border-radius: 8px;
+  min-height: 122px;
+  padding: 16px;
+}
+
+.report-card span {
+  color: #0f172a;
+  display: block;
+  font-size: 15px;
   font-weight: 800;
-  gap: 8px;
-  min-height: 34px;
-  padding: 7px 12px;
+  margin-bottom: 12px;
 }
 
-.counter.blue {
-  background: var(--blue);
+.report-card strong {
+  color: #0f172a;
+  display: block;
+  font-size: 30px;
+  line-height: 1;
+  margin-bottom: 10px;
 }
 
-.counter.green {
-  background: var(--green);
+.report-card small {
+  color: #334155;
+  font-size: 13px;
+}
+
+.report-section-title {
+  color: #0f172a;
+  font-size: 26px;
+  margin: 28px 0 20px;
+}
+
+.chart-frame {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  height: 315px;
+  margin-top: 0;
+  padding: 16px 14px 10px;
 }
 
 #countChart {
-  height: 320px;
-  margin-top: 16px;
+  display: block;
+  height: 285px;
   width: 100%;
+}
+
+.chart-legend {
+  align-items: center;
+  display: flex;
+  gap: 22px;
+  margin-top: 20px;
+  padding-left: 12px;
+}
+
+.legend-item {
+  align-items: center;
+  color: #334155;
+  display: inline-flex;
+  font-size: 15px;
+  gap: 5px;
+}
+
+.legend-item::before {
+  border-radius: 50%;
+  content: "";
+  height: 10px;
+  width: 10px;
+}
+
+.legend-item.blue::before {
+  background: #2f7ed8;
+}
+
+.legend-item.green::before {
+  background: #25a66a;
+}
+
+.legend-item strong {
+  font-weight: 700;
+}
+
+.events-title {
+  margin-top: 30px;
+}
+
+.event-table-wrap {
+  overflow-x: auto;
+}
+
+.event-table {
+  border-collapse: collapse;
+  min-width: 620px;
+  width: 100%;
+}
+
+.event-table th,
+.event-table td {
+  border-bottom: 1px solid #e5e7eb;
+  color: #172033;
+  font-size: 14px;
+  padding: 10px 8px;
+  text-align: left;
+}
+
+.event-table th:last-child,
+.event-table td:last-child {
+  text-align: left;
+  width: 220px;
+}
+
+.event-table th {
+  font-weight: 800;
 }
 
 .record-list {
@@ -495,6 +606,11 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .report-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-width: none;
+  }
+
   .factory-scene {
     height: 500px;
   }
@@ -530,6 +646,18 @@ button:disabled {
 
   .status-badge {
     width: 100%;
+  }
+
+  .chart-panel {
+    padding: 20px 16px;
+  }
+
+  .report-header h2 {
+    font-size: 24px;
+  }
+
+  .report-summary {
+    grid-template-columns: 1fr;
   }
 
   .factory-scene {
@@ -572,6 +700,7 @@ button:disabled {
 
 /* Factory I/O top-view scene */
 .factory-top-view {
+  --factory-map-scale: 0.78;
   background:
     radial-gradient(circle at 20% 24%, rgba(30, 35, 42, 0.12), transparent 14%),
     radial-gradient(circle at 78% 70%, rgba(30, 35, 42, 0.10), transparent 16%),
@@ -580,8 +709,19 @@ button:disabled {
     #aba99f;
   background-size: auto, auto, 120px 120px, 120px 120px, auto;
   border: 1px solid #8f948d;
-  height: 500px;
+  height: 405px;
   isolation: isolate;
+}
+
+.factory-map {
+  height: 500px;
+  left: 12px;
+  position: absolute;
+  top: 8px;
+  transform: scale(var(--factory-map-scale));
+  transform-origin: top left;
+  width: 1080px;
+  z-index: 1;
 }
 
 .factory-top-view .floor-grid {
@@ -993,7 +1133,7 @@ button:disabled {
 
 @media (max-width: 1180px) {
   .factory-top-view {
-    min-width: 1080px;
+    min-width: 860px;
   }
 
   .process-panel {

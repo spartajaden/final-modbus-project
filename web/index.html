@@ -71,7 +71,7 @@
           </div>
           <dl class="status-grid">
             <div>
-              <dt>대상 IP</dt>
+              <dt>localhost</dt>
               <dd id="targetIp">-</dd>
             </div>
             <div>
@@ -98,17 +98,68 @@
         </aside>
 
         <section class="chart-panel">
-          <div class="section-head">
-            <div>
-              <p class="eyebrow">Production Data</p>
-              <h2>데이터 시각화</h2>
-            </div>
-            <div class="counter-pair">
-              <span class="counter blue">Blue <strong id="blueCount">0</strong></span>
-              <span class="counter green">Green <strong id="greenCount">0</strong></span>
-            </div>
+          <div class="report-header">
+            <h2>Factory I/O 생산 리포트</h2>
+            <p id="reportRange">기록 범위: - · CSV 0개</p>
           </div>
-          <canvas id="countChart" width="900" height="320"></canvas>
+
+          <div class="report-summary">
+            <article class="report-card">
+              <span>Blue 생산량</span>
+              <strong id="blueReportCount">0</strong>
+              <small>blue_counted 기준</small>
+            </article>
+            <article class="report-card">
+              <span>Green 생산량</span>
+              <strong id="greenReportCount">0</strong>
+              <small>green_counted 기준</small>
+            </article>
+            <article class="report-card">
+              <span>Machine 평균 주기</span>
+              <strong id="machineAvg">-</strong>
+              <small id="machineDoneCount">0회 완료</small>
+            </article>
+            <article class="report-card">
+              <span>Pusher 평균 주기</span>
+              <strong id="pusherAvg">-</strong>
+              <small id="pusherDoneCount">0회 완료</small>
+            </article>
+          </div>
+
+          <h2 class="report-section-title">데이터 시각화</h2>
+          <div class="chart-frame">
+            <canvas id="countChart" width="900" height="300"></canvas>
+          </div>
+          <div class="chart-legend">
+            <span class="legend-item blue">Blue <strong id="blueCount">0</strong></span>
+            <span class="legend-item green">Green <strong id="greenCount">0</strong></span>
+          </div>
+
+          <h2 class="report-section-title events-title">이벤트 발생 수</h2>
+          <div class="event-table-wrap">
+            <table class="event-table">
+              <thead>
+                <tr>
+                  <th>이벤트</th>
+                  <th>횟수</th>
+                </tr>
+              </thead>
+              <tbody id="eventTableBody">
+                <tr>
+                  <td>state_change</td>
+                  <td>0</td>
+                </tr>
+                <tr>
+                  <td>machine_start</td>
+                  <td>0</td>
+                </tr>
+                <tr>
+                  <td>machine_done</td>
+                  <td>0</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </section>
 
         <section class="records-panel">

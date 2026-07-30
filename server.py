@@ -108,6 +108,51 @@ def find_record_file(name):
     return file_path
 
 
+def disconnect_factory_io():
+    if process.process_run:
+        process.stop_all()
+
+    try:
+        process.client.close()
+    finally:
+        process.connected = False
+
+    return build_status()
+
+
+def create_record_file():
+    if not process.MODBUS_RECORD_ENABLED:
+        raise RuntimeError("Modbus record is disabled")
+
+    now = process.tt.time()
+    with process.modbus_record_lock:
+        process.modbus_record_file_started_at = now
+        process.current_modbus_record_file = process.make_modbus_record_filename(now)
+        process.write_modbus_record_header(process.current_modbus_record_file)
+
+    return {
+        "name": Path(process.current_modbus_record_file).name,
+        "status": build_status(),
+    }
+
+
+def delete_record_file(name):
+    file_path = find_record_file(name)
+    if file_path is None:
+        return None
+
+    active_file = (BASE_DIR / Path(process.current_modbus_record_file).name).resolve()
+    if file_path == active_file and process.process_run:
+        raise RuntimeError("Cannot delete the active CSV while the process is running")
+
+    file_path.unlink()
+    if file_path == active_file:
+        process.current_modbus_record_file = process.MODBUS_RECORD_FILE
+        process.modbus_record_file_started_at = 0.0
+
+    return {"deleted": file_path.name}
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     server_version = "FactoryIOServer/1.0"
 
@@ -179,6 +224,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_json(build_status())
                 return
 
+            if path == "/api/disconnect" or path == "/disconnect":
+                with CONTROL_LOCK:
+                    status = disconnect_factory_io()
+                self.send_json(status)
+                return
+
             if path == "/api/start" or path == "/start":
                 with CONTROL_LOCK:
                     process.auto_start_factory_io(reset_outputs=True)
@@ -189,6 +240,35 @@ class RequestHandler(BaseHTTPRequestHandler):
                 with CONTROL_LOCK:
                     process.stop_all()
                 self.send_json(build_status())
+                return
+
+            if path == "/api/records/new":
+                with CONTROL_LOCK:
+                    payload = create_record_file()
+                self.send_json(payload)
+                return
+
+            self.send_json({"error": "not found"}, status=404)
+        except Exception as exc:
+            self.send_json(
+                {
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                },
+                status=500,
+            )
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+
+        try:
+            if path.startswith("/api/records/"):
+                with CONTROL_LOCK:
+                    payload = delete_record_file(path.removeprefix("/api/records/"))
+                if payload is None:
+                    self.send_json({"error": "CSV record file not found"}, status=404)
+                    return
+                self.send_json(payload)
                 return
 
             self.send_json({"error": "not found"}, status=404)
