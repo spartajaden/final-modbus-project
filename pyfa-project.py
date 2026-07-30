@@ -468,12 +468,20 @@ def conveyors_off():
         write_coil(coil, False)
 
 def stop_all():
-    global process_run, machine_repeat_run
+    global process_run, machine_repeat_run, connected
     process_run = False
     machine_repeat_run = False
-    write_coils(0, [False] * 30)
-    log_modbus_record('process_stop', detail='All outputs stopped')
-    print('All outputs stopped')
+    try:
+        if connected:
+            write_coils(0, [False] * 30)
+        else:
+            print('Modbus is not connected; skipped writing stop coils')
+    except Exception as exc:
+        connected = False
+        print('Stop outputs skipped because Modbus is unavailable:', exc)
+
+    log_modbus_record('process_stop', detail='Stop requested')
+    print('All local process flags stopped')
 
 # Cell 6: machining center and actuator functions
 MACHINES = {

@@ -17,7 +17,7 @@ import traceback
 from urllib.parse import unquote, urlparse
 
 
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 PORT = 9000
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
@@ -45,6 +45,7 @@ def thread_alive(thread):
 
 def build_status():
     return {
+        "server_running": True,
         "connected": bool(process.connected),
         "running": bool(process.process_run),
         "counts": {
@@ -153,6 +154,26 @@ def delete_record_file(name):
     return {"deleted": file_path.name}
 
 
+def prepare_server_shutdown():
+    try:
+        process.stop_all()
+    except Exception as exc:
+        print("Stop before web server shutdown skipped:", exc)
+
+    try:
+        process.client.close()
+    except Exception as exc:
+        print("Client close before web server shutdown skipped:", exc)
+    finally:
+        process.connected = False
+
+    return {
+        "server_running": False,
+        "shutdown": True,
+        "message": "웹 서버를 종료합니다.",
+    }
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     server_version = "FactoryIOServer/1.0"
 
@@ -219,9 +240,19 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         try:
             if path == "/api/connect" or path == "/connect":
-                with CONTROL_LOCK:
-                    process.ensure_factory_io_connected()
-                self.send_json(build_status())
+                try:
+                    with CONTROL_LOCK:
+                        process.ensure_factory_io_connected()
+                    self.send_json(build_status())
+                except Exception:
+                    self.send_json(
+                        {
+                            "error": "서버가 꺼져 있습니다.",
+                            "code": "factory_io_server_off",
+                            "status": build_status(),
+                        },
+                        status=503,
+                    )
                 return
 
             if path == "/api/disconnect" or path == "/disconnect":
@@ -246,6 +277,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 with CONTROL_LOCK:
                     payload = create_record_file()
                 self.send_json(payload)
+                return
+
+            if path == "/api/shutdown":
+                with CONTROL_LOCK:
+                    payload = prepare_server_shutdown()
+                self.send_json(payload)
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
 
             self.send_json({"error": "not found"}, status=404)
@@ -288,6 +326,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_no_cache_headers()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -305,6 +344,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         data = file_path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_no_cache_headers()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -323,6 +363,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_no_cache_headers()
         self.send_header("Content-Length", str(file_path.stat().st_size))
         self.end_headers()
 
@@ -336,9 +377,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/csv; charset=utf-8")
         self.send_header("Content-Disposition", f'attachment; filename="{file_path.name}"')
+        self.send_no_cache_headers()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def send_no_cache_headers(self):
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
 
 
 def main():
@@ -354,7 +401,10 @@ def main():
         print("Stopping server")
     finally:
         try:
-            process.stop_all()
+            try:
+                process.stop_all()
+            except Exception as exc:
+                print("Stop during shutdown skipped:", exc)
         finally:
             try:
                 process.client.close()

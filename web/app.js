@@ -12,6 +12,7 @@ const els = {
   connectBtn: document.querySelector("#connectBtn"),
   startBtn: document.querySelector("#startBtn"),
   stopBtn: document.querySelector("#stopBtn"),
+  shutdownServerBtn: document.querySelector("#shutdownServerBtn"),
   createRecordBtn: document.querySelector("#createRecordBtn"),
   downloadLatestBtn: document.querySelector("#downloadLatestBtn"),
   connectionBadge: document.querySelector("#connectionBadge"),
@@ -47,6 +48,7 @@ function setBusy(isBusy) {
   els.connectBtn.disabled = isBusy;
   els.startBtn.disabled = isBusy || !state.connected;
   els.stopBtn.disabled = isBusy || (!state.connected && !state.running);
+  els.shutdownServerBtn.disabled = isBusy;
   els.createRecordBtn.disabled = isBusy;
 }
 
@@ -60,10 +62,21 @@ function showToast(message) {
 }
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, options);
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch (fetchError) {
+    const error = new Error("서버가 꺼져 있습니다.");
+    error.code = "server_process_off";
+    throw error;
+  }
+
   const payload = await response.json();
   if (!response.ok) {
-    throw new Error(payload.error || `Request failed: ${response.status}`);
+    const error = new Error(payload.error || `Request failed: ${response.status}`);
+    error.code = payload.code;
+    error.statusPayload = payload.status;
+    throw error;
   }
   return payload;
 }
@@ -80,7 +93,15 @@ async function postAction(path, successMessage) {
     await refreshSnapshot();
     await refreshRecords();
   } catch (error) {
-    showToast(error.message);
+    if (error.statusPayload) {
+      renderStatus(error.statusPayload);
+    }
+    if (error.code === "factory_io_server_off" || error.code === "server_process_off") {
+      renderBadge(els.connectionBadge, "서버 꺼짐", "warn");
+      showToast("서버가 꺼져 있습니다.");
+    } else {
+      showToast(error.message);
+    }
   } finally {
     setBusy(false);
   }
@@ -96,6 +117,32 @@ async function createRecordFile(isAutomatic = false) {
     showToast(isAutomatic ? "Auto CSV file created." : "New CSV file created.");
   } catch (error) {
     showToast(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function shutdownWebServer() {
+  if (!window.confirm("웹 서버를 종료할까요? 종료 후에는 이 페이지를 새로 열 수 없습니다.")) {
+    return;
+  }
+
+  try {
+    setBusy(true);
+    await requestJson("/api/shutdown", { method: "POST" });
+    state.connected = false;
+    state.running = false;
+    renderBadge(els.connectionBadge, "서버 꺼짐", "warn");
+    renderBadge(els.runBadge, "Stopped", "off");
+    els.connectBtn.textContent = "연결";
+    showToast("웹 서버를 종료했습니다.");
+  } catch (error) {
+    if (error.code === "server_process_off") {
+      renderBadge(els.connectionBadge, "서버 꺼짐", "warn");
+      showToast("서버가 꺼져 있습니다.");
+    } else {
+      showToast(error.message);
+    }
   } finally {
     setBusy(false);
   }
@@ -186,9 +233,11 @@ function addHistory(snapshot) {
     state.history.push(next);
   } else if (state.history.length === 0) {
     state.history.push(next);
+  } else {
+    previous.time = next.time;
   }
 
-  if (state.history.length > 40) {
+  if (state.history.length > 80) {
     state.history.shift();
   }
 }
@@ -243,25 +292,29 @@ function drawChart() {
 
   const width = rect.width;
   const height = rect.height;
-  const leftPad = 38;
-  const rightPad = 38;
-  const topPad = 18;
-  const bottomPad = 34;
+  const leftPad = 46;
+  const rightPad = 72;
+  const topPad = 22;
+  const bottomPad = 42;
   const plotLeft = leftPad;
   const plotRight = width - rightPad;
   const plotTop = topPad;
   const plotBottom = height - bottomPad;
   const plotWidth = plotRight - plotLeft;
   const plotHeight = plotBottom - plotTop;
-  const history = state.history.length ? state.history : [{ blue: 0, green: 0 }];
+  const history = state.history.length ? state.history : [{ time: new Date(), blue: 0, green: 0 }];
   const maxSeen = Math.max(1, ...history.flatMap((item) => [item.blue, item.green]));
-  const maxValue = Math.max(14, Math.ceil(maxSeen / 2) * 2);
+  const maxValue = Math.max(10, Math.ceil((maxSeen + 1) / 2) * 2);
 
   ctx.clearRect(0, 0, width, height);
 
-  ctx.strokeStyle = "#e7ebf0";
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.strokeStyle = "#e8edf3";
   ctx.lineWidth = 1;
-  for (let value = 0; value <= maxValue; value += 1) {
+  const yStep = maxValue <= 12 ? 1 : 2;
+  for (let value = 0; value <= maxValue; value += yStep) {
     const y = plotBottom - (value / maxValue) * plotHeight;
     ctx.beginPath();
     ctx.moveTo(plotLeft, y);
@@ -273,7 +326,7 @@ function drawChart() {
   ctx.font = "12px Segoe UI, Arial";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
-  for (let value = 0; value <= maxValue; value += 1) {
+  for (let value = 0; value <= maxValue; value += yStep) {
     const y = plotBottom - (value / maxValue) * plotHeight;
     ctx.fillText(String(value), plotLeft - 25, y);
   }
@@ -289,9 +342,39 @@ function drawChart() {
     return plotBottom - (value / maxValue) * plotHeight;
   }
 
-  function drawStepLine(key, color) {
+  function drawArea(key, color) {
+    if (!history.length) {
+      return;
+    }
+    const gradient = ctx.createLinearGradient(0, plotTop, 0, plotBottom);
+    gradient.addColorStop(0, color.replace("1)", "0.18)"));
+    gradient.addColorStop(1, color.replace("1)", "0.02)"));
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.moveTo(xFor(0), plotBottom);
+    history.forEach((item, index) => {
+      const x = xFor(index);
+      const y = yFor(item[key]);
+      if (index === 0) {
+        ctx.lineTo(x, y);
+      } else {
+        const previous = history[index - 1];
+        const prevX = xFor(index - 1);
+        const prevY = yFor(previous[key]);
+        const midX = prevX + (x - prevX) * 0.5;
+        ctx.lineTo(midX, prevY);
+        ctx.lineTo(midX, y);
+        ctx.lineTo(x, y);
+      }
+    });
+    ctx.lineTo(xFor(history.length - 1), plotBottom);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawStepLine(key, color, labelOffset) {
     ctx.strokeStyle = color;
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 3.2;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.beginPath();
@@ -311,10 +394,36 @@ function drawChart() {
       }
     });
     ctx.stroke();
+
+    const last = history[history.length - 1];
+    const lastX = xFor(history.length - 1);
+    const lastY = yFor(last[key]);
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.font = "700 12px Segoe UI, Arial";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${key === "blue" ? "Blue" : "Green"} ${last[key]}`, lastX + 10, lastY + labelOffset);
   }
 
-  drawStepLine("blue", "#2f7ed8");
-  drawStepLine("green", "#25a66a");
+  drawArea("green", "rgba(37, 166, 106, 1)");
+  drawArea("blue", "rgba(47, 126, 216, 1)");
+  drawStepLine("green", "#25a66a", -12);
+  drawStepLine("blue", "#2f7ed8", 12);
+
+  ctx.strokeStyle = "#d4dae3";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(plotLeft, plotBottom);
+  ctx.lineTo(plotRight, plotBottom);
+  ctx.stroke();
 
   const firstTime = history[0]?.time instanceof Date ? history[0].time : new Date();
   const lastTime = history[history.length - 1]?.time instanceof Date ? history[history.length - 1].time : firstTime;
@@ -369,11 +478,22 @@ async function refreshSnapshot() {
     updateReportStats();
     drawChart();
   } catch (error) {
-    const status = await requestJson("/api/status");
-    renderStatus(status);
-    addHistory({ status, modbus: {} });
-    updateReportStats();
-    drawChart();
+    if (error.code === "server_process_off") {
+      renderBadge(els.connectionBadge, "서버 꺼짐", "warn");
+      return;
+    }
+
+    try {
+      const status = await requestJson("/api/status");
+      renderStatus(status);
+      addHistory({ status, modbus: {} });
+      updateReportStats();
+      drawChart();
+    } catch (statusError) {
+      if (statusError.code === "server_process_off") {
+        renderBadge(els.connectionBadge, "서버 꺼짐", "warn");
+      }
+    }
   }
 }
 
@@ -456,6 +576,10 @@ els.startBtn.addEventListener("click", () => {
 
 els.stopBtn.addEventListener("click", () => {
   postAction("/api/stop", "Process stopped.");
+});
+
+els.shutdownServerBtn.addEventListener("click", () => {
+  shutdownWebServer();
 });
 
 els.createRecordBtn.addEventListener("click", () => {
